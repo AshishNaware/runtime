@@ -23,10 +23,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	clientgotesting "k8s.io/client-go/testing"
 	ref "k8s.io/client-go/tools/reference"
+	"reconciler.io/runtime/duck"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -134,6 +137,20 @@ func (w *clientWrapper) objmeta(obj runtime.Object) (schema.GroupVersionResource
 
 func (w *clientWrapper) react(action Action) error {
 	for _, reactor := range w.reactionChain {
+		if !reactor.Handles(action) {
+			continue
+		}
+		handled, _, err := reactor.React(action)
+		if !handled {
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
+func (w *clientWrapper) reactWatcherFunc(action Action) error {
+	for _, reactor := range w.watchReactionChain {
 		if !reactor.Handles(action) {
 			continue
 		}
@@ -311,6 +328,31 @@ func (w *clientWrapper) DeleteAllOf(ctx context.Context, obj client.Object, opts
 	}
 
 	return w.client.DeleteAllOf(ctx, obj, opts...)
+}
+
+func (c *clientWrapper) Watch(ctx context.Context, list client.ObjectList, opts ...client.ListOption) (watch.Interface, error) {
+	ww, ok := c.client.(client.WithWatch)
+	if !ok {
+		panic(fmt.Errorf("unable to call Watch with wrapped client that does not implement client.WithWatch"))
+	}
+
+	if !duck.IsDuck(list, c.Scheme()) {
+		return ww.Watch(ctx, list, opts...)
+	}
+
+	uObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(list)
+	if err != nil {
+		return nil, err
+	}
+	u := &unstructured.UnstructuredList{Object: uObj}
+	w, err := ww.Watch(ctx, u, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, list); err != nil {
+		return nil, err
+	}
+	return w, nil
 }
 
 func (w *clientWrapper) Status() client.StatusWriter {
