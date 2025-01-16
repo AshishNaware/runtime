@@ -330,13 +330,36 @@ func (w *clientWrapper) DeleteAllOf(ctx context.Context, obj client.Object, opts
 	return w.client.DeleteAllOf(ctx, obj, opts...)
 }
 
-func (c *clientWrapper) Watch(ctx context.Context, list client.ObjectList, opts ...client.ListOption) (watch.Interface, error) {
-	ww, ok := c.client.(client.WithWatch)
+func (w *clientWrapper) Watch(ctx context.Context, list client.ObjectList, opts ...client.ListOption) (watch.Interface, error) {
+	gvr, namespace, name, err := w.objmeta(list)
+	if err != nil {
+		return nil, err
+	}
+
+	// call reactor chain
+	err = w.reactWatcherFunc(clientgotesting.NewGetAction(gvr, namespace, name))
+	if err != nil {
+		return nil, err
+	}
+	err = w.reactWatcherFunc(clientgotesting.NewCreateAction(gvr, namespace, list))
+	if err != nil {
+		return nil, err
+	}
+	err = w.reactWatcherFunc(clientgotesting.NewDeleteAction(gvr, namespace, name))
+	if err != nil {
+		return nil, err
+	}
+	err = w.reactWatcherFunc(clientgotesting.NewUpdateAction(gvr, namespace, list))
+	if err != nil {
+		return nil, err
+	}
+
+	ww, ok := w.client.(client.WithWatch)
 	if !ok {
 		panic(fmt.Errorf("unable to call Watch with wrapped client that does not implement client.WithWatch"))
 	}
 
-	if !duck.IsDuck(list, c.Scheme()) {
+	if !duck.IsDuck(list, w.Scheme()) {
 		return ww.Watch(ctx, list, opts...)
 	}
 
@@ -345,14 +368,14 @@ func (c *clientWrapper) Watch(ctx context.Context, list client.ObjectList, opts 
 		return nil, err
 	}
 	u := &unstructured.UnstructuredList{Object: uObj}
-	w, err := ww.Watch(ctx, u, opts...)
+	watcher, err := ww.Watch(ctx, u, opts...)
 	if err != nil {
 		return nil, err
 	}
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, list); err != nil {
 		return nil, err
 	}
-	return w, nil
+	return watcher, nil
 }
 
 func (w *clientWrapper) Status() client.StatusWriter {
